@@ -32,12 +32,6 @@
         settingItemId:0]
 */
 
-static BOOL IsEnabled(NSString *key) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:key];
-}
-static int GetSelection(NSString *key) {
-    return [[NSUserDefaults standardUserDefaults] integerForKey:key];
-}
 static int contrastMode() {
     return [[NSUserDefaults standardUserDefaults] integerForKey:@"lcm"];
 }
@@ -47,8 +41,6 @@ static int appVersionSpoofer() {
 
 @interface YTSettingsSectionItemManager (YTLitePlus)
 - (void)updateYTLitePlusSectionWithEntry:(id)entry;
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls;
-- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller;
 @end
 
 extern NSBundle *YTLitePlusBundle();
@@ -82,7 +74,7 @@ static const NSInteger YTLiteSection = 789;
 %end
 
 
-// Settings
+// Add YTLitePlus to the settings list
 %hook YTAppSettingsPresentationData
 + (NSArray *)settingsCategoryOrder {
     NSArray *order = %orig;
@@ -110,14 +102,15 @@ static const NSInteger YTLiteSection = 789;
     Class YTSettingsSectionItemClass = %c(YTSettingsSectionItem);
     YTSettingsViewController *settingsViewController = [self valueForKey:@"_settingsViewControllerDelegate"];
 
+    // Add item for going to the YTLitePlus GitHub page
     YTSettingsSectionItem *main = [%c(YTSettingsSectionItem)
-    itemWithTitle:[NSString stringWithFormat:LOC(@"VERSION"), @(OS_STRINGIFY(TWEAK_VERSION))]
-    titleDescription:LOC(@"VERSION_CHECK")
-    accessibilityIdentifier:nil
-    detailTextBlock:nil
-    selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
-        return [%c(YTUIUtils) openURL:[NSURL URLWithString:@"https://github.com/YTLitePlus/YTLitePlus/releases/latest"]];
-    }];
+        itemWithTitle:[NSString stringWithFormat:LOC(@"VERSION"), @(OS_STRINGIFY(TWEAK_VERSION))]
+        titleDescription:LOC(@"VERSION_CHECK")
+        accessibilityIdentifier:nil
+        detailTextBlock:nil
+        selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+            return [%c(YTUIUtils) openURL:[NSURL URLWithString:@"https://github.com/YTLitePlus/YTLitePlus/releases/latest"]];
+        }];
     [sectionItems addObject:main];
 
     YTSettingsSectionItem *copySettings = [%c(YTSettingsSectionItem)
@@ -199,29 +192,6 @@ static const NSInteger YTLiteSection = 789;
     ];
     [sectionItems addObject:pasteSettings];
 
-    YTSettingsSectionItem *videoPlayer = [%c(YTSettingsSectionItem)
-        itemWithTitle:LOC(@"VIDEO_PLAYER")
-        titleDescription:LOC(@"VIDEO_PLAYER_DESC")
-        accessibilityIdentifier:nil
-        detailTextBlock:nil
-        selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
-            // Access the current view controller
-            UIViewController *settingsViewController = [self valueForKey:@"_settingsViewControllerDelegate"];
-            if (settingsViewController) {
-                // Present the video picker
-                UIDocumentPickerViewController *documentPicker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[(NSString *)kUTTypeMovie, (NSString *)kUTTypeVideo] inMode:UIDocumentPickerModeImport];
-                documentPicker.delegate = (id<UIDocumentPickerDelegate>)self;
-                documentPicker.allowsMultipleSelection = NO;
-                [settingsViewController presentViewController:documentPicker animated:YES completion:nil];
-            } else {
-                NSLog(@"settingsViewController is nil");
-            }
-            
-            return YES; // Return YES to indicate that the action was handled
-        }
-    ];
-    [sectionItems addObject:videoPlayer];
-
 /*
     YTSettingsSectionItem *appIcon = [%c(YTSettingsSectionItem)
         itemWithTitle:LOC(@"CHANGE_APP_ICON")
@@ -236,6 +206,181 @@ static const NSInteger YTLiteSection = 789;
     ];
     [sectionItems addObject:appIcon];
 */
+
+# pragma mark - Player Gestures - @bhackel
+    // Helper to get the selected gesture mode
+    static NSString* (^sectionGestureSelectedModeToString)(GestureMode) = ^(GestureMode sectionIndex) {
+        switch (sectionIndex) {
+            case GestureModeVolume:
+                return LOC(@"VOLUME");
+            case GestureModeBrightness:
+                return LOC(@"BRIGHTNESS");
+            case GestureModeSeek:
+                return LOC(@"SEEK");
+            case GestureModeDisabled:
+                return LOC(@"DISABLED");
+            default:
+                return @"Invalid index - Report bug";
+        }
+    };
+
+    // Helper to generate checkmark setting items for selecting gesture modes
+    static YTSettingsSectionItem* (^gestureCheckmarkSettingItem)(NSInteger, NSString *) = ^(NSInteger idx, NSString *key) {
+        return [YTSettingsSectionItemClass 
+            checkmarkItemWithTitle:sectionGestureSelectedModeToString(idx)
+            selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+                [[NSUserDefaults standardUserDefaults] setInteger:idx forKey:key];
+                [settingsViewController reloadData];
+                return YES;
+            }
+        ];
+    };
+
+    // Helper to generate a section item for selecting a gesture mode
+    YTSettingsSectionItem *(^createSectionGestureSelector)(NSString *, NSString *) = ^YTSettingsSectionItem *(NSString *sectionLabel, NSString *sectionKey) {
+        return [YTSettingsSectionItemClass itemWithTitle:LOC(sectionLabel)
+            accessibilityIdentifier:nil
+            detailTextBlock:^NSString *() {
+                return sectionGestureSelectedModeToString(GetInteger(sectionKey));
+            }
+            selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+                NSArray <YTSettingsSectionItem *> *rows = @[
+                    gestureCheckmarkSettingItem(0, sectionKey), // Volume                             
+                    gestureCheckmarkSettingItem(1, sectionKey), // Brightness
+                    gestureCheckmarkSettingItem(2, sectionKey), // Seek
+                    gestureCheckmarkSettingItem(3, sectionKey)  // Disabled
+                ];
+                // Present picker when selecting this settings item
+                YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] 
+                    initWithNavTitle:LOC(sectionLabel) 
+                    pickerSectionTitle:nil 
+                    rows:rows 
+                    selectedItemIndex:GetInteger(sectionKey) 
+                    parentResponder:[self parentResponder]
+                ];
+                [settingsViewController pushViewController:picker];
+                return YES;
+            }
+        ];
+    };
+    // Configuration picker for deadzone to pick from 0 to 100 pixels with interval of 10
+    NSMutableArray<NSNumber *> *deadzoneValues = [NSMutableArray array];
+    for (CGFloat value = 0; value <= 100; value += 10) {
+        [deadzoneValues addObject:@(value)];
+    }
+    YTSettingsSectionItem *deadzonePicker = [YTSettingsSectionItemClass 
+        itemWithTitle:LOC(@"DEADZONE") 
+        titleDescription:LOC(@"DEADZONE_DESC")
+        accessibilityIdentifier:nil 
+        detailTextBlock:^NSString *() {
+            return [NSString stringWithFormat:@"%ld px", (long)GetFloat(@"playerGesturesDeadzone")];
+        }
+        selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+            // Generate rows for deadzone picker using the predefined array
+            NSMutableArray <YTSettingsSectionItem *> *deadzoneRows = [NSMutableArray array];
+            for (NSNumber *deadzoneValue in deadzoneValues) {
+                CGFloat deadzone = [deadzoneValue floatValue];
+                [deadzoneRows addObject:[YTSettingsSectionItemClass 
+                    checkmarkItemWithTitle:[NSString stringWithFormat:@"%ld px", (long)deadzone] 
+                    selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+                        [[NSUserDefaults standardUserDefaults] setFloat:deadzone forKey:@"playerGesturesDeadzone"];
+                        [settingsViewController reloadData];
+                        return YES;
+                    }
+                ]];
+            }
+            // Determine the index of the currently selected deadzone
+            CGFloat currentDeadzone = GetFloat(@"playerGesturesDeadzone");
+            NSUInteger selectedIndex = [deadzoneValues indexOfObject:@(currentDeadzone)];
+            if (selectedIndex == NSNotFound) {
+                selectedIndex = 0; // Default to the first item if the current deadzone is not found
+            }
+            // Present deadzone picker when selecting this settings item
+            YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] 
+                initWithNavTitle:LOC(@"DEADZONE") 
+                pickerSectionTitle:nil 
+                rows:deadzoneRows 
+                selectedItemIndex:selectedIndex 
+                parentResponder:[self parentResponder]
+            ];
+            [settingsViewController pushViewController:picker];
+            return YES;
+        }
+    ];
+
+    // Configuration picker for sensitivity to pick from 0.5 to 2.0 with interval of 0.1
+    NSMutableArray<NSNumber *> *sensitivityValues = [NSMutableArray array];
+    for (CGFloat value = 0.5; value <= 2.0; value += 0.1) {
+        [sensitivityValues addObject:@(value)];
+    }
+    YTSettingsSectionItem *sensitivityPicker = [YTSettingsSectionItemClass 
+        itemWithTitle:LOC(@"SENSITIVITY") 
+        titleDescription:LOC(@"SENSITIVITY_DESC")
+        accessibilityIdentifier:nil 
+        detailTextBlock:^NSString *() {
+            return [NSString stringWithFormat:@"%.1f", GetFloat(@"playerGesturesSensitivity")];
+        }
+        selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+            // Generate rows for sensitivity picker using the predefined array
+            NSMutableArray <YTSettingsSectionItem *> *sensitivityRows = [NSMutableArray array];
+            for (NSNumber *sensitivityValue in sensitivityValues) {
+                CGFloat sensitivity = [sensitivityValue floatValue];
+                [sensitivityRows addObject:[YTSettingsSectionItemClass 
+                    checkmarkItemWithTitle:[NSString stringWithFormat:@"%.1f", sensitivity] 
+                    selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+                        [[NSUserDefaults standardUserDefaults] setFloat:sensitivity forKey:@"playerGesturesSensitivity"];
+                        [settingsViewController reloadData];
+                        return YES;
+                    }
+                ]];
+            }
+            // Determine the index of the currently selected sensitivity
+            CGFloat currentSensitivity = GetFloat(@"playerGesturesSensitivity");
+            NSUInteger selectedIndex = [sensitivityValues indexOfObject:@(currentSensitivity)];
+            if (selectedIndex == NSNotFound) {
+                selectedIndex = 0; // Default to the first item if the current sensitivity is not found
+            }
+            // Present sensitivity picker
+            YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] 
+                initWithNavTitle:LOC(@"SENSITIVITY") 
+                pickerSectionTitle:nil 
+                rows:sensitivityRows 
+                selectedItemIndex:selectedIndex 
+                parentResponder:[self parentResponder]
+            ];
+            [settingsViewController pushViewController:picker];
+            return YES;
+        }
+    ];
+
+    // Create and add items to the high level gestures menu
+    YTSettingsSectionItem *playerGesturesGroup = [YTSettingsSectionItemClass itemWithTitle:LOC(@"PLAYER_GESTURES_TITLE") accessibilityIdentifier:nil detailTextBlock:nil selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+        NSArray <YTSettingsSectionItem *> *rows = @[
+            // Description header item
+            [YTSettingsSectionItemClass 
+                itemWithTitle:nil
+                titleDescription:LOC(@"PLAYER_GESTURES_DESC")
+                accessibilityIdentifier:nil
+                detailTextBlock:nil
+                selectBlock:nil
+            ],
+            // Toggle for enabling gestures
+            BASIC_SWITCH(LOC(@"PLAYER_GESTURES_TOGGLE"), nil, @"playerGestures_enabled"),
+            // Pickers for each gesture section
+            createSectionGestureSelector(@"TOP_SECTION",    @"playerGestureTopSelection"),
+            createSectionGestureSelector(@"MIDDLE_SECTION", @"playerGestureMiddleSelection"),
+            createSectionGestureSelector(@"BOTTOM_SECTION", @"playerGestureBottomSelection"),
+            // Pickers for configuration settings
+            deadzonePicker,
+            sensitivityPicker,
+            // Toggle for haptic feedback
+            BASIC_SWITCH(LOC(@"PLAYER_GESTURES_HAPTIC_FEEDBACK"), nil, @"playerGesturesHapticFeedback_enabled"),
+        ];        
+        YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:LOC(@"Player Gestures (Beta)") pickerSectionTitle:nil rows:rows selectedItemIndex:NSNotFound parentResponder:[self parentResponder]];
+        [settingsViewController pushViewController:picker];
+        return YES;
+    }];
+    [sectionItems addObject:playerGesturesGroup];
 
 # pragma mark - Video Controls Overlay Options
     YTSettingsSectionItem *videoControlOverlayGroup = [YTSettingsSectionItemClass itemWithTitle:LOC(@"VIDEO_CONTROLS_OVERLAY_OPTIONS") accessibilityIdentifier:nil detailTextBlock:nil selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
@@ -391,7 +536,7 @@ static const NSInteger YTLiteSection = 789;
     YTSettingsSectionItem *themeGroup = [YTSettingsSectionItemClass itemWithTitle:LOC(@"THEME_OPTIONS")
         accessibilityIdentifier:nil
         detailTextBlock:^NSString *() {
-            switch (GetSelection(@"appTheme")) {
+            switch (GetInteger(@"appTheme")) {
                 case 1:
                     return LOC(@"OLD_DARK_THEME");
                 case 0:
@@ -415,7 +560,7 @@ static const NSInteger YTLiteSection = 789;
                 BASIC_SWITCH(LOC(@"LOW_CONTRAST_MODE"), LOC(@"LOW_CONTRAST_MODE_DESC"), @"lowContrastMode_enabled"),
                 lowContrastModeSection
             ];
-            YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:LOC(@"THEME_OPTIONS") pickerSectionTitle:nil rows:rows selectedItemIndex:GetSelection(@"appTheme") parentResponder:[self parentResponder]];
+            YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:LOC(@"THEME_OPTIONS") pickerSectionTitle:nil rows:rows selectedItemIndex:GetInteger(@"appTheme") parentResponder:[self parentResponder]];
             [settingsViewController pushViewController:picker];
             return YES;
         }];
@@ -427,7 +572,8 @@ static const NSInteger YTLiteSection = 789;
     YTSettingsSectionItem *playbackInFeedsGroup = [YTSettingsSectionItemClass itemWithTitle:LOC(@"PLAYBACK_IN_FEEDS")
         accessibilityIdentifier:nil
         detailTextBlock:^NSString *() {
-            switch (GetSelection(@"inline_muted_playback_enabled")) {
+            // The specific values were gathered by checking the value for each setting
+            switch (GetInteger(@"inline_muted_playback_enabled")) {
                 case 3:
                     return LOC(@"PLAYBACK_IN_FEEDS_WIFI_ONLY");
                 case 1:
@@ -456,9 +602,14 @@ static const NSInteger YTLiteSection = 789;
                 }],
             ];
             // It seems values greater than 3 act the same as Always On (Index 1)
-            int (^getInlineSelection)() = ^int() {
-                int selection = GetSelection(@"inline_muted_playback_enabled") - 1;
-                return selection > 3 ? 1 : selection;
+            // Convert the stored value to an index for a picker (0 to 2)
+            NSInteger (^getInlineSelection)(void) = ^NSInteger(void) {
+                NSInteger selection = GetInteger(@"inline_muted_playback_enabled") - 1;
+                // Check if selection is within the valid bounds [0, 1, 2]
+                if (selection < 0 || selection > 2) {
+                    return 1;
+                }
+                return selection;
             };
             YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:LOC(@"PLAYBACK_IN_FEEDS") pickerSectionTitle:nil rows:rows selectedItemIndex:getInlineSelection() parentResponder:[self parentResponder]];
             [settingsViewController pushViewController:picker];
@@ -478,6 +629,7 @@ static const NSInteger YTLiteSection = 789;
             BASIC_SWITCH(LOC(@"CAST_CONFIRM"), LOC(@"CAST_CONFIRM_DESC"), @"castConfirm_enabled"),
             BASIC_SWITCH(LOC(@"NEW_MINIPLAYER_STYLE"), LOC(@"NEW_MINIPLAYER_STYLE_DESC"), @"bigYTMiniPlayer_enabled"),
             BASIC_SWITCH(LOC(@"HIDE_CAST_BUTTON"), LOC(@"HIDE_CAST_BUTTON_DESC"), @"hideCastButton_enabled"),
+            BASIC_SWITCH(LOC(@"VIDEO_PLAYER_BUTTON"), LOC(@"VIDEO_PLAYER_BUTTON_DESC"), @"videoPlayerButton_enabled"),
             BASIC_SWITCH(LOC(@"HIDE_SPONSORBLOCK_BUTTON"), LOC(@"HIDE_SPONSORBLOCK_BUTTON_DESC"), @"hideSponsorBlockButton_enabled"),
             BASIC_SWITCH(LOC(@"HIDE_HOME_TAB"), LOC(@"HIDE_HOME_TAB_DESC"), @"hideHomeTab_enabled"),
             BASIC_SWITCH(LOC(@"FIX_CASTING"), LOC(@"FIX_CASTING_DESC"), @"fixCasting_enabled"),
@@ -505,30 +657,5 @@ static const NSInteger YTLiteSection = 789;
     %orig;
 }
 
-// Implement the delegate method for document picker
-%new
-- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSURL *pickedURL = [urls firstObject];
-    
-    if (pickedURL) {
-        // Use AVPlayerViewController to play the video
-        AVPlayer *player = [AVPlayer playerWithURL:pickedURL];
-        AVPlayerViewController *playerViewController = [[AVPlayerViewController alloc] init];
-        playerViewController.player = player;
-        
-        UIViewController *settingsViewController = [self valueForKey:@"_settingsViewControllerDelegate"];
-        if (settingsViewController) {
-            [settingsViewController presentViewController:playerViewController animated:YES completion:^{
-                [player play];
-            }];
-        }
-    }
-}
-
-%new
-- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    // Handle cancellation if needed
-    NSLog(@"Document picker was cancelled");
-}
-
 %end
+
